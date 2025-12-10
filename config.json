@@ -1,0 +1,24 @@
+{
+  "listen_addr": "0.0.0.0:8080",
+  "max_retries": 1,
+  "upstreams": [
+    {
+      "name": "maskify",
+      "host": "proxy.maskify.su",
+      "port": 80,
+      "username_template": "user-318d3010d5bb4d66a3fbd7ad76f6c83e-session-{session}-ttl-{session_time}-region-{country}",
+      "password_env": "MASKIFY_PASSWORD",
+      "session_time_unit": "seconds",
+      "session_time_max": 21600
+    },
+    {
+      "name": "netlox",
+      "host": "proxy.netloxproxies.com",
+      "port": 8080,
+      "username_template": "66FT1Y5PRD_{country}_{session_time}_{session}",
+      "password_env": "NETLOX_PASSWORD",
+      "session_time_unit": "minutes",
+      "session_time_max": 10080
+    }
+  ]
+}

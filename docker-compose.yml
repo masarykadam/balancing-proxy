@@ -1,0 +1,23 @@
+services:
+  balancing-proxy:
+    build: .
+    container_name: balancing-proxy
+    restart: always
+    ports:
+      - "9999:8080"
+    environment:
+      - VPS_PASSWORD=${VPS_PASSWORD}
+      - NETLOX_PASSWORD=${NETLOX_PASSWORD}
+      - MASKIFY_PASSWORD=${MASKIFY_PASSWORD}
+    networks:
+      - shared-net
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  shared-net:
+    external: true
