@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -101,6 +103,19 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Authenticated: country=%s, session_time=%ds, session=%s",
 		sessionInfo.Country, sessionInfo.SessionTime, sessionInfo.SessionID)
 
+	// Buffer request body for potential retries (only for non-CONNECT requests with body)
+	var bodyBytes []byte
+	if r.Method != http.MethodConnect && r.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		r.Body.Close()
+		if err != nil {
+			log.Printf("Failed to read request body: %v", err)
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Try upstreams with failover
 	var lastErr error
 	maxAttempts := min(config.MaxRetries+1, len(config.Upstreams))
@@ -114,6 +129,10 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
 			lastErr = handleHTTPS(w, r, &upstream, sessionInfo)
 		} else {
+			// Restore body for each attempt
+			if bodyBytes != nil {
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
 			lastErr = handleHTTP(w, r, &upstream, sessionInfo)
 		}
 
@@ -154,7 +173,7 @@ func authenticateClient(r *http.Request) (*SessionInfo, error) {
 
 	username, password := parts[0], parts[1]
 
-	if password != vpsPassword {
+	if subtle.ConstantTimeCompare([]byte(password), []byte(vpsPassword)) != 1 {
 		return nil, fmt.Errorf("invalid password")
 	}
 
@@ -187,7 +206,8 @@ func parseUsername(username string) (*SessionInfo, error) {
 	}, nil
 }
 
-func buildUpstreamCredentials(upstream *UpstreamConfig, session *SessionInfo) string {
+// buildUpstreamCredentials returns raw username and password for upstream proxy
+func buildUpstreamCredentials(upstream *UpstreamConfig, session *SessionInfo) (username, password string) {
 	// Convert session time to provider's unit
 	sessionTime := session.SessionTime
 	if upstream.SessionTimeUnit == "minutes" {
@@ -200,34 +220,38 @@ func buildUpstreamCredentials(upstream *UpstreamConfig, session *SessionInfo) st
 	}
 
 	// Build username from template
-	username := upstream.UsernameTemplate
+	username = upstream.UsernameTemplate
 	username = strings.ReplaceAll(username, "{country}", strings.ToUpper(session.Country))
 	username = strings.ReplaceAll(username, "{country_lower}", strings.ToLower(session.Country))
 	username = strings.ReplaceAll(username, "{session}", session.SessionID)
 	username = strings.ReplaceAll(username, "{session_time}", fmt.Sprintf("%d", sessionTime))
 
 	// Get password from env
-	password := os.Getenv(upstream.PasswordEnv)
+	password = os.Getenv(upstream.PasswordEnv)
 
 	log.Printf("  -> user=%s", username)
 
-	// Return URL-encoded credentials (user:pass)
-	return url.QueryEscape(username) + ":" + url.QueryEscape(password)
+	return username, password
 }
 
-func buildUpstreamAuth(upstream *UpstreamConfig, session *SessionInfo) string {
-	creds := buildUpstreamCredentials(upstream, session)
-	// Unescape for base64 encoding (HTTPS CONNECT uses base64)
-	creds, _ = url.QueryUnescape(creds)
+// buildUpstreamProxyURL returns URL-encoded proxy URL for http.Transport
+func buildUpstreamProxyURL(upstream *UpstreamConfig, session *SessionInfo) string {
+	username, password := buildUpstreamCredentials(upstream, session)
+	return fmt.Sprintf("http://%s:%s@%s:%d",
+		url.QueryEscape(username), url.QueryEscape(password),
+		upstream.Host, upstream.Port)
+}
+
+// buildUpstreamAuthHeader returns base64-encoded auth for Proxy-Authorization header
+func buildUpstreamAuthHeader(upstream *UpstreamConfig, session *SessionInfo) string {
+	username, password := buildUpstreamCredentials(upstream, session)
+	creds := username + ":" + password
 	return base64.StdEncoding.EncodeToString([]byte(creds))
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request, upstream *UpstreamConfig, session *SessionInfo) error {
-	// Build upstream credentials
-	upstreamAuth := buildUpstreamCredentials(upstream, session)
-
-	// Embed auth in proxy URL (Go's http.Transport expects this)
-	proxyURL := fmt.Sprintf("http://%s@%s:%d", upstreamAuth, upstream.Host, upstream.Port)
+	// Build proxy URL with embedded credentials
+	proxyURL := buildUpstreamProxyURL(upstream, session)
 	proxy, _ := url.Parse(proxyURL)
 
 	transport := &http.Transport{
@@ -247,8 +271,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, upstream *UpstreamConfig
 		},
 	}
 
-	// Create new request
-	outReq, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	// Create new request with context for cancellation support
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
 	if err != nil {
 		return err
 	}
@@ -293,7 +317,7 @@ func handleHTTPS(w http.ResponseWriter, r *http.Request, upstream *UpstreamConfi
 
 	// Send CONNECT request to upstream proxy
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n",
-		r.Host, r.Host, buildUpstreamAuth(upstream, session))
+		r.Host, r.Host, buildUpstreamAuthHeader(upstream, session))
 
 	upstreamConn.SetDeadline(time.Now().Add(30 * time.Second))
 	_, err = upstreamConn.Write([]byte(connectReq))
