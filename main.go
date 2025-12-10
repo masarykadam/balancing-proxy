@@ -33,8 +33,8 @@ type UpstreamConfig struct {
 	Port             int    `json:"port"`
 	UsernameTemplate string `json:"username_template"`
 	PasswordEnv      string `json:"password_env"`
-	SessionTimeUnit  string `json:"session_time_unit"`  // "seconds" or "minutes"
-	SessionTimeMax   int64  `json:"session_time_max"`   // max in provider's unit
+	SessionTimeUnit  string `json:"session_time_unit"` // "seconds" or "minutes"
+	SessionTimeMax   int64  `json:"session_time_max"`  // max in provider's unit
 }
 
 // SessionInfo holds parsed session information from client
@@ -371,11 +371,4 @@ func handleHTTPS(w http.ResponseWriter, r *http.Request, upstream *UpstreamConfi
 	}()
 
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
